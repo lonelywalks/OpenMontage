@@ -733,7 +733,7 @@ const OverlayRenderer: React.FC<{ overlay: Overlay }> = ({ overlay }) => {
   if (overlay.type === "section_title") {
     return (
       <SectionTitle
-        title={overlay.text}
+        title={overlay.text ?? ""}
         subtitle={overlay.subtitle}
         accentColor={overlay.accentColor}
         position={(overlay.position as any) || "top-left"}
@@ -743,15 +743,15 @@ const OverlayRenderer: React.FC<{ overlay: Overlay }> = ({ overlay }) => {
   if (overlay.type === "stat_reveal") {
     return (
       <StatReveal
-        stat={overlay.text}
-        label={overlay.subtitle}
+        stat={overlay.text ?? ""}
+        label={overlay.subtitle ?? ""}
         accentColor={overlay.accentColor}
         position={(overlay.position as any) || "bottom-right"}
       />
     );
   }
   if (overlay.type === "hero_title") {
-    return <HeroTitle title={overlay.text} subtitle={overlay.subtitle} />;
+    return <HeroTitle title={overlay.text ?? ""} subtitle={overlay.subtitle} />;
   }
   if (overlay.type === "provider_chip" && overlay.providers) {
     return (

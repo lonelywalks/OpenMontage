@@ -193,7 +193,7 @@ export const Root: React.FC = () => {
       />
       <Composition
         id="TitledVideo"
-        component={TitledVideo}
+        component={TitledVideo as any}
         durationInFrames={30 * 60}
         fps={30}
         width={1920}
@@ -207,11 +207,11 @@ export const Root: React.FC = () => {
           fontSize: 148,
           accentColor: "#F5C470",
         }}
-        calculateMetadata={calculateTitledVideoMetadata}
+        calculateMetadata={calculateTitledVideoMetadata as any}
       />
       <Composition
         id="HeroTitle"
-        component={HeroTitle}
+        component={HeroTitle as any}
         durationInFrames={30 * 17}
         fps={30}
         width={1920}
@@ -223,7 +223,7 @@ export const Root: React.FC = () => {
       />
       <Composition
         id="ProductReveal"
-        component={ProductReveal}
+        component={ProductReveal as any}
         durationInFrames={30 * 8}
         fps={30}
         width={1280}
@@ -239,7 +239,7 @@ export const Root: React.FC = () => {
       />
       <Composition
         id="ProductRevealVertical"
-        component={ProductReveal}
+        component={ProductReveal as any}
         durationInFrames={30 * 8}
         fps={30}
         width={720}
@@ -255,7 +255,7 @@ export const Root: React.FC = () => {
       />
       <Composition
         id="CaptionOverlayOnly"
-        component={CaptionOverlay}
+        component={CaptionOverlay as any}
         durationInFrames={30 * 300}
         fps={30}
         width={1920}
@@ -270,7 +270,7 @@ export const Root: React.FC = () => {
       />
       <Composition
         id="CollageBurst"
-        component={CollageBurst}
+        component={CollageBurst as any}
         durationInFrames={30 * 30}
         fps={30}
         width={1080}
@@ -285,7 +285,7 @@ export const Root: React.FC = () => {
       />
       <Composition
         id="LyricOverlay"
-        component={LyricOverlay}
+        component={LyricOverlay as any}
         durationInFrames={30 * 28}
         fps={30}
         width={1080}
@@ -298,7 +298,7 @@ export const Root: React.FC = () => {
       />
       <Composition
         id="EndTag"
-        component={EndTag}
+        component={EndTag as any}
         // 5.5s at 30fps = 165 frames. Render CLI can override via --props.
         durationInFrames={165}
         fps={30}
@@ -314,7 +314,7 @@ export const Root: React.FC = () => {
       />
       <Composition
         id="EndTagOverlay"
-        component={EndTag}
+        component={EndTag as any}
         // 8.19s at 30fps = 246 frames. Render CLI can override via --props.
         // Intended to be composited on top of body footage, not concat'd.
         durationInFrames={246}
