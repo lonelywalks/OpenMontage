@@ -2,6 +2,7 @@
 project markers, and tool-event instrumentation."""
 
 import json
+import os
 
 import pytest
 
@@ -82,6 +83,30 @@ class TestGateEnforcement:
 
 class TestCheckpointHistory:
     """Superseded checkpoints are archived, not destroyed."""
+
+    def test_checkpoint_replace_retries_transient_permission_error(self, tmp_path, monkeypatch):
+        calls = {"count": 0}
+        real_replace = os.replace
+
+        def flaky_replace(src, dst):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise PermissionError("simulated transient Windows reader lock")
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(os, "replace", flaky_replace)
+
+        path = write_checkpoint(
+            tmp_path,
+            "proj",
+            "assets",
+            "in_progress",
+            artifacts={},
+            pipeline_type="cinematic",
+        )
+
+        assert path.exists()
+        assert calls["count"] == 2
 
     def test_overwrite_archives_previous(self, tmp_path):
         write_checkpoint(

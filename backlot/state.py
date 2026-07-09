@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
 
@@ -59,6 +61,7 @@ def _rel(project_dir: Path, path: Path) -> str:
 # Pipeline / stages
 # ---------------------------------------------------------------------------
 
+@lru_cache(maxsize=64)
 def _load_pipeline_meta(pipeline_type: Optional[str]) -> dict[str, Any]:
     """Stage order + gate flags from the manifest; graceful fallback."""
     if pipeline_type and pipeline_type != "unknown":
@@ -86,6 +89,59 @@ def _load_pipeline_meta(pipeline_type: Optional[str]) -> dict[str, Any]:
         "stages": [{"name": s, "gated": False} for s in FALLBACK_STAGES],
         "known": False,
     }
+
+
+@lru_cache(maxsize=64)
+def _load_pipeline_meta_light(pipeline_type: Optional[str]) -> dict[str, Any]:
+    """Fast stage metadata for library summaries, without schema validation.
+
+    ``load_pipeline`` imports/validates with jsonschema, which is correct for
+    full project state but too expensive for the library hot path on Windows.
+    Pipeline definition files are trusted repo files, so a tiny stage scanner is
+    enough for card summaries.
+    """
+    if not pipeline_type or pipeline_type == "unknown":
+        return {
+            "pipeline_type": pipeline_type or "unknown",
+            "stages": [{"name": s, "gated": False} for s in FALLBACK_STAGES],
+            "known": False,
+        }
+    path = REPO_ROOT / "pipeline_defs" / f"{pipeline_type}.yaml"
+    if not path.is_file():
+        return {
+            "pipeline_type": pipeline_type,
+            "stages": [{"name": s, "gated": False} for s in FALLBACK_STAGES],
+            "known": False,
+        }
+
+    stages: list[dict[str, Any]] = []
+    current: Optional[dict[str, Any]] = None
+    in_stages = False
+    try:
+        for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if raw.startswith("stages:"):
+                in_stages = True
+                continue
+            if not in_stages:
+                continue
+            if raw and not raw.startswith(" "):
+                break
+            stripped = raw.strip()
+            if stripped.startswith("- name:"):
+                if current:
+                    stages.append(current)
+                current = {"name": stripped.split(":", 1)[1].strip().strip('"\''), "gated": False}
+            elif current and stripped.startswith("human_approval_default:"):
+                value = stripped.split(":", 1)[1].strip().lower()
+                current["gated"] = value in {"true", "yes", "1"}
+        if current:
+            stages.append(current)
+    except OSError:
+        stages = []
+
+    if not stages:
+        stages = [{"name": s, "gated": False} for s in FALLBACK_STAGES]
+    return {"pipeline_type": pipeline_type, "stages": stages, "known": bool(stages)}
 
 
 def _resolve_artifact(project_dir: Path, value: Any) -> Optional[dict]:
@@ -591,7 +647,7 @@ def load_board_state(project_dir: Path) -> dict[str, Any]:
             if pt and pt != "unknown":
                 pipeline_type = pt
                 break
-    pipeline_meta = _load_pipeline_meta(pipeline_type)
+    pipeline_meta = _load_pipeline_meta_light(pipeline_type)
 
     artifacts = _collect_artifacts(project_dir, checkpoints)
     events = read_events(project_dir, limit=250)
@@ -647,27 +703,96 @@ def load_board_state(project_dir: Path) -> dict[str, Any]:
 
 
 def summarize_project(project_dir: Path) -> dict[str, Any]:
-    """Cheap library-card summary (no full artifact parse of big files)."""
-    state = load_board_state(project_dir)
-    active = next((s for s in state["stages"] if s["status"] in ("in_progress", "awaiting_human")), None)
-    done = [s for s in state["stages"] if s["status"] == "completed"]
+    """Cheap library-card summary.
+
+    The library endpoint may summarize dozens of projects per refresh. Keep this
+    path bounded: read only marker/checkpoint/stage metadata plus tiny counts,
+    and leave full artifact/storyboard/media parsing to ``load_board_state``.
+    """
+    project_dir = Path(project_dir)
+    project_id = project_dir.name
+    checkpoints = _collect_checkpoints(project_dir)
+    history = _collect_history(project_dir)
+    marker = {}
+
+    pipeline_type = None
+    for cp in checkpoints.values():
+        pt = cp.get("pipeline_type")
+        if pt and pt != "unknown":
+            pipeline_type = pt
+            break
+    if not pipeline_type:
+        marker = _read_json(project_dir / "project.json") or {}
+        pipeline_type = marker.get("pipeline_type")
+    pipeline_meta = _load_pipeline_meta_light(pipeline_type)
+    stages = _build_stage_rail(pipeline_meta, checkpoints, history)
+    active = next((s for s in stages if s["status"] in ("in_progress", "awaiting_human")), None)
+    done = [s for s in stages if s["status"] == "completed"]
+
+    # Scene details are resolved in full board state. Library cards stay cheap.
+    scene_count = 0
+    render_count = 0
+    try:
+        renders_dir = project_dir / "renders"
+        if renders_dir.is_dir():
+            render_count += sum(
+                1 for f in renders_dir.iterdir()
+                if f.is_file() and f.suffix.lower() in MEDIA_VIDEO_EXT
+            )
+        render_count += sum(
+            1 for f in project_dir.glob("*.mp4")
+            if f.is_file()
+        )
+    except OSError:
+        render_count = 0
+
+    poster = None
+    for rel_dir in ("assets/images", "snapshots", "verify"):
+        d = project_dir / rel_dir
+        if not d.is_dir():
+            continue
+        try:
+            for f in sorted(d.iterdir()):
+                if f.is_file() and f.suffix.lower() in MEDIA_IMAGE_EXT:
+                    poster = _rel(project_dir, f)
+                    break
+        except OSError:
+            continue
+        if poster:
+            break
+
+    import time
+    last_activity = max(
+        (cp.get("_mtime", 0) for cp in checkpoints.values()),
+        default=0.0,
+    )
+    if not last_activity:
+        try:
+            last_activity = (project_dir / "project.json").stat().st_mtime
+        except OSError:
+            last_activity = 0.0
+    now = time.time()
+    title = marker.get("title")
+    if not title and not checkpoints:
+        meta_json = _read_json(project_dir / "meta.json") or {}
+        title = meta_json.get("name")
     return {
-        "project_id": state["project_id"],
-        "title": state["title"],
-        "pipeline_type": state["pipeline"]["pipeline_type"],
-        "has_pipeline_state": state["has_pipeline_state"],
-        "poster": state["poster"],
-        "live": state["live"],
-        "last_activity": state["last_activity"],
+        "project_id": project_id,
+        "title": title or project_id.replace("-", " ").title(),
+        "pipeline_type": pipeline_meta["pipeline_type"],
+        "has_pipeline_state": bool(checkpoints),
+        "poster": poster,
+        "live": bool(last_activity and (now - last_activity) < LIVE_WINDOW_SECONDS),
+        "last_activity": last_activity,
         "active_stage": active["name"] if active else None,
         "awaiting_human": bool(active and active["status"] == "awaiting_human"),
         "stage_states": [
             {"name": s["name"], "status": s["status"]}
-            for s in state["stages"] if not s.get("undeclared")
+            for s in stages if not s.get("undeclared")
         ],
         "completed_count": len(done),
-        "render_count": len(state["media"]["renders"]),
-        "scene_count": len((state["storyboard"] or {}).get("scenes", [])),
+        "render_count": render_count,
+        "scene_count": scene_count,
     }
 
 
@@ -676,14 +801,16 @@ def list_projects(projects_dir: Optional[Path] = None) -> list[dict[str, Any]]:
     root = Path(projects_dir) if projects_dir else PROJECTS_DIR
     if not root.is_dir():
         return []
-    summaries = []
-    for entry in sorted(root.iterdir()):
-        if not entry.is_dir() or entry.name.startswith(("_", ".")):
-            continue
+    entries = [
+        entry for entry in sorted(root.iterdir())
+        if entry.is_dir() and not entry.name.startswith(("_", "."))
+    ]
+
+    def summarize_entry(entry: Path) -> dict[str, Any]:
         try:
-            summaries.append(summarize_project(entry))
+            return summarize_project(entry)
         except Exception:
-            summaries.append({
+            return {
                 "project_id": entry.name,
                 "title": entry.name.replace("-", " ").title(),
                 "pipeline_type": "unknown",
@@ -698,6 +825,13 @@ def list_projects(projects_dir: Optional[Path] = None) -> list[dict[str, Any]]:
                 "render_count": 0,
                 "scene_count": 0,
                 "error": "unreadable",
-            })
+            }
+
+    if len(entries) > 4:
+        workers = min(8, len(entries))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            summaries = list(pool.map(summarize_entry, entries))
+    else:
+        summaries = [summarize_entry(entry) for entry in entries]
     summaries.sort(key=lambda s: (not s["live"], -(s["last_activity"] or 0)))
     return summaries

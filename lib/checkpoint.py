@@ -7,6 +7,8 @@ checkpoints to resume pipelines and to present state at human checkpoints.
 from __future__ import annotations
 
 import json
+import os
+import time
 from functools import lru_cache
 from datetime import datetime, timezone
 from pathlib import Path
@@ -164,6 +166,27 @@ def validate_checkpoint(checkpoint: dict[str, Any]) -> None:
 
 def _checkpoint_path(pipeline_dir: Path, project_id: str, stage: str) -> Path:
     return pipeline_dir / project_id / f"checkpoint_{stage}.json"
+
+
+def _replace_checkpoint_with_retry(tmp_path: Path, path: Path) -> None:
+    """Atomically replace a checkpoint, tolerating transient Windows readers.
+
+    Backlot's local server watches and reads checkpoint files while producers are
+    still writing them. On Windows, a concurrent reader can briefly hold the
+    destination path and make ``os.replace`` raise ``PermissionError`` even
+    though the operation is safe to retry milliseconds later. POSIX systems do
+    not usually expose this race, so keep the retry narrow and only for that
+    exact transient error.
+    """
+    delays = (0.02, 0.05, 0.1, 0.2, 0.4)
+    for attempt, delay in enumerate((*delays, None), start=1):
+        try:
+            os.replace(tmp_path, path)
+            return
+        except PermissionError:
+            if delay is None:
+                raise
+            time.sleep(delay)
 
 
 def init_project(
@@ -452,8 +475,7 @@ def write_checkpoint(
     # Preserve run history: a superseded completed/awaiting_human checkpoint
     # is copied to history/ (stage versioning, gate audit trail, replay).
     _archive_superseded_checkpoint(path, stage)
-    import os
-    os.replace(tmp_path, path)
+    _replace_checkpoint_with_retry(tmp_path, path)
 
     return path
 
